@@ -40,6 +40,7 @@ import org.apache.http.HttpHost;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.client.Requests;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.example.model.*;
 import org.example.process.DataAnalysis;
 import org.example.source.FakeSource;
@@ -52,7 +53,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 public class Main {
-    private static Integer WindowSizeMinute=10;
+    private static Integer WindowSizeMinute=1;
     private static class LogDataProcess implements AggregateFunction<LogData,List<LogData>, EsResAsset>{
 
         @Override
@@ -70,12 +71,14 @@ public class Main {
         public EsResAsset getResult(List<LogData> accumulator) {
             EsResAsset res=new EsResAsset();
             res.setId("asset-"+getKeySuffix(accumulator.size()>0 ? accumulator.get(0).getEvent_time() : System.currentTimeMillis(),WindowSizeMinute));
-            res.setNormal_indicator(accumulator.stream().filter(e->e.getLog_level()>4).count());
-            res.setAbnormal_indicator(accumulator.stream().filter(e->e.getLog_level()<=4).count());
+            res.setNormal_indicator(accumulator.stream().filter(e->e.getLog_level()<300).count());
+            res.setAbnormal_indicator(accumulator.stream().filter(e->e.getLog_level()>=300).count());
             res.setAccount_indicator(accumulator.stream().filter(e-> !StringUtils.isNullOrWhitespaceOnly(e.getRelated_account())).count());
             res.setCaz_ips(accumulator.stream().map(LogData::getClient_addr).distinct().collect(Collectors.toList()));
             res.setIndicator_time(accumulator.size()>0 ? accumulator.get(0).getEvent_time() : System.currentTimeMillis());
             return res;
+
+
         }
 
         @Override
@@ -101,6 +104,7 @@ public class Main {
         @Override
         public EsResThreat getResult(List<EventData> accumulator) {
             EsResThreat res = new EsResThreat();
+
             res.setId("threat-"+getKeySuffix(accumulator.size()>0 ? accumulator.get(0).getEvent_time() : System.currentTimeMillis(),WindowSizeMinute));
             res.setAbnormal_aggregation(accumulator.stream().map(EventData::getClasstype).distinct().count());
             res.setHost_aggregation(accumulator.stream().map(EventData::getSrc_ip).distinct().count());
@@ -125,26 +129,33 @@ public class Main {
         return Requests.indexRequest()
                 .index("asset_index")
                 .id(element.getId())
-                .source(element);
+                .source(JSONObject.toJSONString(element), XContentType.JSON);
     }
 
     private static IndexRequest indexThreatElement(EsResThreat element) {
         return Requests.indexRequest()
                 .index("threat_index")
                 .id(element.getId())
-                .source(element);
+                .source(JSONObject.toJSONString(element), XContentType.JSON);
     }
 
     private static IndexRequest indexGlobalElement(EsResGlobal element) {
         return Requests.indexRequest()
                 .index("global_index")
                 .id(element.getId())
-                .source(element);
+                .source(JSONObject.toJSONString(element), XContentType.JSON);
     }
     private static Float calIpsOverlap(List<String> ips_a,List<String> ips_b){
         if(CollectionUtils.isEmpty(ips_a) || CollectionUtils.isEmpty(ips_b)){
             return 0f;
         }else{
+
+
+
+
+
+
+
             return (CollectionUtils.intersection(ips_a,ips_b).size()+0f)/CollectionUtils.union(ips_a,ips_b).size();
         }
     }
@@ -162,7 +173,7 @@ public class Main {
         KafkaSource<String> event_source = KafkaSource.<String>builder()
                 .setBootstrapServers("kafka:9092")
                 .setTopics("event_data")
-                .setGroupId("csm")
+                .setGroupId("csm"+UUID.randomUUID().toString())
                 .setStartingOffsets(OffsetsInitializer.committedOffsets(OffsetResetStrategy.EARLIEST))
                 .setValueOnlyDeserializer(new SimpleStringSchema())
                 .build();
@@ -170,7 +181,7 @@ public class Main {
         KafkaSource<String> log_source = KafkaSource.<String>builder()
                 .setBootstrapServers("kafka:9092")
                 .setTopics("log_data")
-                .setGroupId("csm")
+                .setGroupId("csm"+UUID.randomUUID().toString())
                 .setStartingOffsets(OffsetsInitializer.committedOffsets(OffsetResetStrategy.EARLIEST))
                 .setValueOnlyDeserializer(new SimpleStringSchema())
                 .build();
@@ -182,7 +193,9 @@ public class Main {
                 .aggregate(new EventDataProcess());
         event_stream.sinkTo(new Elasticsearch7SinkBuilder<EsResThreat>()
                         .setBulkFlushMaxActions(1) // Instructs the sink to emit after every element, otherwise they would be buffered
-                        .setHosts(new HttpHost("elastic", 9200, "http"))
+                        .setHosts(new HttpHost("172.30.64.1", 9200, "http"))
+                        .setConnectionUsername("elastic")
+                        .setConnectionPassword("changeme")
                         .setEmitter((element, context, indexer) ->indexer.add(indexThreatElement(element)))
                         .build())
                 .name("event_process");
@@ -195,7 +208,9 @@ public class Main {
 
         log_stream.sinkTo(new Elasticsearch7SinkBuilder<EsResAsset>()
                         .setBulkFlushMaxActions(1) // Instructs the sink to emit after every element, otherwise they would be buffered
-                        .setHosts(new HttpHost("elastic", 9200, "http"))
+                        .setHosts(new HttpHost("172.30.64.1", 9200, "http"))
+                        .setConnectionUsername("elastic")
+                        .setConnectionPassword("changeme")
                         .setEmitter(
                                 (element, context, indexer) ->
                                         indexer.add(indexAssetElement(element)))
@@ -233,7 +248,9 @@ public class Main {
             }
         }).sinkTo(new Elasticsearch7SinkBuilder<EsResGlobal>()
                         .setBulkFlushMaxActions(1) // Instructs the sink to emit after every element, otherwise they would be buffered
-                        .setHosts(new HttpHost("elastic", 9200, "http"))
+                        .setHosts(new HttpHost("172.30.64.1", 9200, "http"))
+                        .setConnectionUsername("elastic")
+                        .setConnectionPassword("changeme")
                         .setEmitter(
                                 (element, context, indexer) ->
                                         indexer.add(indexGlobalElement(element)))
